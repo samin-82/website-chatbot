@@ -10,29 +10,29 @@ __pycache__/
 dist/
 build/
 
-# Virtual environment
 .venv/
 venv/
 ENV/
 env/
 
-# Vector database & embeddings (large files)
 vector_index.faiss
 chunks_metadata.pkl
 embedding_model.pkl
 
-# API keys & config (important!)
 config.py
 
-# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS
 .DS_Store
 Thumbs.db
 
-# Logs
 *.log
+
+chat_bot_final.py
+chatbot_app.py
+smart_chatbot.py
+hi.py
+list_models.py

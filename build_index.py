@@ -1,13 +1,7 @@
 import time
 import pickle
 import numpy as np
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
+import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 from sentence_transformers import SentenceTransformer
@@ -15,131 +9,117 @@ import faiss
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 TARGET_URL = "https://irvex.ir/"
-MAX_PAGES = 30  
-DELAY = 2
+MAX_PAGES = 30
+DELAY = 1
 
-def setup_driver():
-    """تنظیم مرورگر Chrome با WebDriver Manager"""
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")  
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=chrome_options)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "fa,en;q=0.5",
+}
 
-def crawl_dynamic(start_url, max_pages=20, delay=2):
-    """خزش وبسایت‌های داینامیک با Selenium"""
-    driver = setup_driver()
+
+def crawl(start_url, max_pages=30, delay=1):
     visited = set()
     to_visit = [start_url]
     all_texts = []
-    
-    print(f"شروع خزش از {start_url} با Selenium و WebDriver Manager...")
-    
+
+    print(f"Starting crawl from {start_url}...")
+
     while to_visit and len(visited) < max_pages:
         current_url = to_visit.pop(0)
         if current_url in visited:
             continue
-            
+
         try:
-            print(f"در حال باز کردن: {current_url}")
-            driver.get(current_url)
-            
-            try:
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((By.TAG_NAME, "body"))
-                )
-                time.sleep(delay)
-            except:
-                print(f"⏰ تایم‌اوت در بارگذاری {current_url}")
-            
-            html = driver.page_source
-            soup = BeautifulSoup(html, 'html.parser')
-            
-            for script in soup(["script", "style", "noscript"]):
-                script.decompose()
-            
+            print(f"Fetching: {current_url}")
+            resp = requests.get(current_url, headers=HEADERS, timeout=15, allow_redirects=True)
+            if resp.status_code != 200:
+                print(f"  Skipped (status {resp.status_code})")
+                visited.add(current_url)
+                continue
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            for tag in soup(["script", "style", "noscript"]):
+                tag.decompose()
+
             text = soup.get_text(separator=" ", strip=True)
             text = " ".join(text.split())
-            
+
             if len(text) > 200:
                 all_texts.append({"url": current_url, "content": text})
-                print(f"✅ خزیده شد: {current_url} (طول: {len(text)})")
+                print(f"  OK ({len(text)} chars)")
             else:
-                print(f"⚠️ متن کوتاه در: {current_url} (طول: {len(text)})")
-            
-            links = driver.find_elements(By.TAG_NAME, "a")
-            for link in links:
-                try:
-                    href = link.get_attribute("href")
-                    if href and href.startswith("http"):
-                        if urlparse(href).netloc == urlparse(start_url).netloc:
-                            if href not in visited and href not in to_visit:
-                                to_visit.append(href)
-                except:
-                    continue
-                            
+                print(f"  Skipped (too short: {len(text)} chars)")
+
+            for a_tag in soup.find_all("a", href=True):
+                href = a_tag["href"]
+                if href.startswith("/"):
+                    href = urljoin(current_url, href)
+                if href.startswith("http") and urlparse(href).netloc == urlparse(start_url).netloc:
+                    if "#" in href:
+                        href = href.split("#")[0]
+                    if href not in visited and href not in to_visit:
+                        to_visit.append(href)
+
         except Exception as e:
-            print(f"❌ خطا در {current_url}: {e}")
-            
+            print(f"  Error: {e}")
+
         visited.add(current_url)
-        time.sleep(1)
-        
-    driver.quit()
-    print(f"خزش تمام شد. {len(all_texts)} صفحه با محتوا پیدا شد.")
+        time.sleep(delay)
+
+    print(f"Crawl complete. {len(all_texts)} pages with content.")
     return all_texts
+
 
 def chunk_documents(docs, chunk_size=500, chunk_overlap=50):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", " ", ""]
+        separators=["\n\n", "\n", " ", ""],
     )
     chunks = []
     for doc in docs:
-        chunks_text = splitter.split_text(doc["content"])
-        for chunk in chunks_text:
-            if len(chunk) > 50:
-                chunks.append({"text": chunk, "source": doc["url"]})
-    print(f"تعداد تکه‌های ایجاد شده: {len(chunks)}")
+        for chunk_text in splitter.split_text(doc["content"]):
+            if len(chunk_text) > 50:
+                chunks.append({"text": chunk_text, "source": doc["url"]})
+    print(f"Created {len(chunks)} chunks.")
     return chunks
 
-def build_vector_store(chunks, model_name='all-MiniLM-L6-v2'):
+
+def build_vector_store(chunks, model_name="all-MiniLM-L6-v2"):
     model = SentenceTransformer(model_name)
-    print("مدل بردارساز بارگذاری شد.")
-    texts = [chunk["text"] for chunk in chunks]
+    print("Embedding model loaded.")
+    texts = [c["text"] for c in chunks]
     embeddings = model.encode(texts, show_progress_bar=True)
-    embeddings = np.array(embeddings).astype('float32')
-    
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dimension)
+    embeddings = np.array(embeddings).astype("float32")
+
+    index = faiss.IndexFlatL2(embeddings.shape[1])
     index.add(embeddings)
-    print(f"ایندکس ساخته شد. تعداد بردارها: {index.ntotal}")
-    
+    print(f"Index built. Vectors: {index.ntotal}")
+
     faiss.write_index(index, "vector_index.faiss")
     with open("chunks_metadata.pkl", "wb") as f:
         pickle.dump(chunks, f)
     with open("embedding_model.pkl", "wb") as f:
         pickle.dump(model, f)
-    print("✅ تمام فایل‌های بانک اطلاعاتی ذخیره شدند.")
+    print("All files saved.")
     return index, chunks, model
 
+
 if __name__ == "__main__":
-    print("🚀 مرحله 1: در حال خزش وبسایت با Selenium...")
-    docs = crawl_dynamic(TARGET_URL, max_pages=MAX_PAGES, delay=DELAY)
-    
+    print("Step 1: Crawling website...")
+    docs = crawl(TARGET_URL, max_pages=MAX_PAGES, delay=DELAY)
+
     if docs:
-        print("🚀 مرحله 2: در حال خرد کردن متن‌ها...")
+        print("Step 2: Splitting into chunks...")
         chunks = chunk_documents(docs)
         if chunks:
-            print("🚀 مرحله 3: در حال ساخت بردارها...")
+            print("Step 3: Building vector index...")
             build_vector_store(chunks)
-            print("\n🎉 تمام شد! حالا چت‌بات را اجرا کن.")
+            print("\nDone! Now run the chatbot.")
         else:
-            print("❌ هیچ تکه‌ای ساخته نشد. محتوای صفحات خالی است.")
+            print("No chunks created. Pages may have empty content.")
     else:
-        print("❌ هیچ محتوایی پیدا نشد. آدرس را بررسی کن.")
+        print("No content found. Check the URL.")
